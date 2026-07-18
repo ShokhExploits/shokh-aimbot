@@ -177,7 +177,8 @@ local function createKeySystem()
     
     -- Entrance animation
     card.Position = UDim2.new(0.5, -190, -0.5, -160)
-    TweenService:Create(card, TweenInfo.new(0.5, Enum.EasingStyle.Quart, Enum.EasingDirection.Out), {
+    -- smoother bounce entrance
+    TweenService:Create(card, TweenInfo.new(0.55, Enum.EasingStyle.Back, Enum.EasingDirection.Out), {
         Position = UDim2.new(0.5, -190, 0.5, -160)
     }):Play()
     
@@ -236,6 +237,39 @@ local function createKeySystem()
                 os.execute('open "' .. url .. '"')
             end
         end)
+    end)
+
+    -- Close button (visual only - does not bypass key)
+    local closeBtn = Instance.new("TextButton")
+    closeBtn.Size = UDim2.new(0,28,0,28)
+    closeBtn.Position = UDim2.new(1,-36,0,8)
+    closeBtn.Text = "✕"
+    closeBtn.Font = Enum.Font.GothamBold
+    closeBtn.TextSize = 16
+    closeBtn.TextColor3 = Color3.fromRGB(200,200,200)
+    closeBtn.BackgroundTransparency = 1
+    closeBtn.Parent = card
+    closeBtn.MouseButton1Click:Connect(function()
+        -- small shake animation to indicate can't close
+        local orig = card.Position
+        for i=1,3 do
+            TweenService:Create(card, TweenInfo.new(0.05, Enum.EasingStyle.Sine, Enum.EasingDirection.Out), {Position = orig + UDim2.new(0,6,0,0)}):Play()
+            task.wait(0.05)
+            TweenService:Create(card, TweenInfo.new(0.05, Enum.EasingStyle.Sine, Enum.EasingDirection.Out), {Position = orig + UDim2.new(0,-6,0,0)}):Play()
+            task.wait(0.05)
+        end
+        TweenService:Create(card, TweenInfo.new(0.06, Enum.EasingStyle.Sine, Enum.EasingDirection.Out), {Position = orig}):Play()
+    end)
+
+    -- Prevent escape from bypassing: play a subtle flash when ESC pressed
+    local escConn; escConn = UserInputService.InputBegan:Connect(function(inp, gp)
+        if gp then return end
+        if inp.KeyCode == Enum.KeyCode.Escape then
+            -- flash border
+            local origCol = stroke.Color
+            stroke.Color = Color3.fromRGB(218,52,52)
+            task.delay(0.18, function() stroke.Color = origCol end)
+        end
     end)
     
     -- Loading animation
@@ -340,12 +374,12 @@ end)
 --  GUN MODS
 -- ════════════════════════════════════════════════════════════════════════════
 
-local gunConnections = {}
+local gunConnections = {} -- map tool -> {conns}
 local lastAmmo = {}
 
 local function setupGunMods()
-    for _, conn in ipairs(gunConnections) do
-        pcall(function() conn:Disconnect() end)
+    for tool, conns in pairs(gunConnections) do
+        for _, c in ipairs(conns) do pcall(function() c:Disconnect() end) end
     end
     gunConnections = {}
     
@@ -356,82 +390,70 @@ local function setupGunMods()
     
     -- Hook tool activation
     local function hookTool(tool)
-        if not tool:IsA("Tool") then return end
-        
+        if not tool or not tool:IsA or not tool:IsA("Tool") then return end
+        -- avoid double-hook
+        if gunConnections[tool] then return end
+        local conns = {}
+
         -- Infinite ammo heartbeat
         if cfg.gunInfAmmo then
             local ammoConn = RunService.Heartbeat:Connect(function()
-                if not cfg.gunInfAmmo or not tool or not tool.Parent then 
-                    return 
-                end
-                
+                if not cfg.gunInfAmmo or not tool or not tool.Parent then return end
                 pcall(function()
-                    -- Check for Ammo value
                     local ammo = tool:FindFirstChild("Ammo")
-                    if ammo and ammo:IsA("IntValue") then
-                        if ammo.Value <= 0 then
-                            ammo.Value = 999
-                        end
-                    end
-                    
-                    -- Check for mag/magazine
+                    if ammo and ammo:IsA("IntValue") then if ammo.Value <= 0 then ammo.Value = 999 end end
                     local mag = tool:FindFirstChild("Magazine") or tool:FindFirstChild("Mag")
-                    if mag and mag:IsA("IntValue") then
-                        if mag.Value <= 0 then
-                            mag.Value = 999
-                        end
-                    end
-                    
-                    -- Check for ammo in handle
-                    if tool.Handle then
+                    if mag and mag:IsA("IntValue") then if mag.Value <= 0 then mag.Value = 999 end end
+                    if tool:FindFirstChild("Handle") then
                         local handleAmmo = tool.Handle:FindFirstChild("Ammo")
-                        if handleAmmo and handleAmmo:IsA("IntValue") then
-                            if handleAmmo.Value <= 0 then
-                                handleAmmo.Value = 999
-                            end
-                        end
+                        if handleAmmo and handleAmmo:IsA("IntValue") then if handleAmmo.Value <= 0 then handleAmmo.Value = 999 end end
                     end
                 end)
             end)
-            table.insert(gunConnections, ammoConn)
+            table.insert(conns, ammoConn)
         end
-        
-        -- No reload hook
+
+        -- No reload: try to intercept reload-related events conservatively
         if cfg.gunNoReload then
-            local reloadConn = tool.Activated:Connect(function()
+            -- also watch for child changes that look like magazine depletion
+            local reloadConn = tool.DescendantAdded:Connect(function(desc)
                 pcall(function()
                     local mag = tool:FindFirstChild("Magazine") or tool:FindFirstChild("Mag")
-                    if mag and mag:IsA("IntValue") then
-                        mag.Value = 30
-                    end
-                    
+                    if mag and mag:IsA("IntValue") then mag.Value = math.max(mag.Value, 1) end
                     local ammo = tool:FindFirstChild("Ammo")
-                    if ammo and ammo:IsA("IntValue") then
-                        ammo.Value = 999
-                    end
+                    if ammo and ammo:IsA("IntValue") then ammo.Value = math.max(ammo.Value, 1) end
                 end)
             end)
-            table.insert(gunConnections, reloadConn)
+            table.insert(conns, reloadConn)
         end
-        
+
         -- No spread
         if cfg.gunNoSpread then
             local spreadConn = RunService.Heartbeat:Connect(function()
                 if not cfg.gunNoSpread or not tool or not tool.Parent then return end
-                
                 pcall(function()
                     local spread = tool:FindFirstChild("Spread")
                     if spread then
-                        if spread:IsA("Vector3Value") then
-                            spread.Value = Vector3.new(0,0,0)
-                        elseif spread:IsA("NumberValue") then
-                            spread.Value = 0
-                        end
+                        if spread:IsA("Vector3Value") then spread.Value = Vector3.new(0,0,0)
+                        elseif spread:IsA("NumberValue") then spread.Value = 0 end
                     end
                 end)
             end)
-            table.insert(gunConnections, spreadConn)
+            table.insert(conns, spreadConn)
         end
+
+        gunConnections[tool] = conns
+
+        -- cleanup when tool removed
+        local anc; anc = tool.AncestryChanged:Connect(function()
+            if not tool.Parent then
+                if gunConnections[tool] then
+                    for _, c in ipairs(gunConnections[tool]) do pcall(function() c:Disconnect() end) end
+                    gunConnections[tool] = nil
+                end
+                anc:Disconnect()
+            end
+        end)
     end
     
     -- Hook all tools in backpack
@@ -471,6 +493,7 @@ end
 -- ════════════════════════════════════════════════════════════════════════════
 
 local espConnections = {}
+local espPool = {}
 
 local function getESPColor()
     if cfg.rainbow then
@@ -480,172 +503,165 @@ local function getESPColor()
     end
 end
 
-local function drawBoxESP(screenPos, size, color, isFull)
-    pcall(function()
-        local boxSize = size * 20
-        local halfBox = boxSize / 2
-        
-        if isFull then
-            -- Full box
-            local box = Drawing.new("Rectangle")
-            box.Position = screenPos - Vector2.new(halfBox, halfBox)
-            box.Size = Vector2.new(boxSize, boxSize)
-            box.Color = color
-            box.Thickness = 1.5
-            box.Filled = false
-            
-            task.delay(0.016, function()
-                pcall(function() box:Remove() end)
+local function createDrawing(typeName)
+    local ok, obj = pcall(function() return Drawing.new(typeName) end)
+    if ok and obj then return obj end
+    return nil
+end
+
+local function drawBoxESPFor(player, screenPos, size, color, isFull)
+    -- persistent drawings per-player stored in espPool
+    if not espPool[player] then espPool[player] = {} end
+    local pool = espPool[player]
+    local boxSize = math.max(6, size * 20)
+    local halfBox = boxSize / 2
+
+    -- Full box
+    if isFull then
+        if not pool.box then pool.box = createDrawing("Square") or createDrawing("Rectangle") end
+        local box = pool.box
+        if box then
+            pcall(function()
+                box.Position = Vector2.new(screenPos.X - halfBox, screenPos.Y - halfBox)
+                box.Size = Vector2.new(boxSize, boxSize)
+                box.Color = color
+                box.Visible = true
+                box.Filled = false
+                box.Thickness = 1.5
             end)
-        else
-            -- Corner box
-            local cornerSize = boxSize / 4
-            local corners = {
-                {pos = screenPos - Vector2.new(halfBox, halfBox), pos2 = screenPos - Vector2.new(halfBox - cornerSize, halfBox)},
-                {pos = screenPos - Vector2.new(halfBox, halfBox), pos2 = screenPos - Vector2.new(halfBox, halfBox + cornerSize)},
-                {pos = screenPos + Vector2.new(halfBox, halfBox), pos2 = screenPos + Vector2.new(halfBox - cornerSize, halfBox)},
-                {pos = screenPos + Vector2.new(halfBox, halfBox), pos2 = screenPos + Vector2.new(halfBox, halfBox - cornerSize)},
-                {pos = screenPos - Vector2.new(-halfBox, halfBox), pos2 = screenPos - Vector2.new(-halfBox + cornerSize, halfBox)},
-                {pos = screenPos - Vector2.new(-halfBox, halfBox), pos2 = screenPos - Vector2.new(-halfBox, halfBox + cornerSize)},
-                {pos = screenPos + Vector2.new(-halfBox, -halfBox), pos2 = screenPos + Vector2.new(-halfBox + cornerSize, -halfBox)},
-                {pos = screenPos + Vector2.new(-halfBox, -halfBox), pos2 = screenPos + Vector2.new(-halfBox, -halfBox - cornerSize)},
-            }
-            
-            for _, corner in ipairs(corners) do
-                local line = Drawing.new("Line")
-                line.From = corner.pos
-                line.To = corner.pos2
-                line.Color = color
-                line.Thickness = 1.5
-                line.Transparency = 1
-                
-                task.delay(0.016, function()
-                    pcall(function() line:Remove() end)
+        end
+    else
+        -- corner box: use up to 8 lines
+        pool.corners = pool.corners or {}
+        local corners = {
+            {pos = Vector2.new(screenPos.X - halfBox, screenPos.Y - halfBox), pos2 = Vector2.new(screenPos.X - halfBox + boxSize/4, screenPos.Y - halfBox)},
+            {pos = Vector2.new(screenPos.X - halfBox, screenPos.Y - halfBox), pos2 = Vector2.new(screenPos.X - halfBox, screenPos.Y - halfBox + boxSize/4)},
+            {pos = Vector2.new(screenPos.X + halfBox, screenPos.Y + halfBox), pos2 = Vector2.new(screenPos.X + halfBox - boxSize/4, screenPos.Y + halfBox)},
+            {pos = Vector2.new(screenPos.X + halfBox, screenPos.Y + halfBox), pos2 = Vector2.new(screenPos.X + halfBox, screenPos.Y + halfBox - boxSize/4)},
+            {pos = Vector2.new(screenPos.X - halfBox, screenPos.Y + halfBox), pos2 = Vector2.new(screenPos.X - halfBox + boxSize/4, screenPos.Y + halfBox)},
+            {pos = Vector2.new(screenPos.X - halfBox, screenPos.Y + halfBox), pos2 = Vector2.new(screenPos.X - halfBox, screenPos.Y + halfBox - boxSize/4)},
+            {pos = Vector2.new(screenPos.X + halfBox, screenPos.Y - halfBox), pos2 = Vector2.new(screenPos.X + halfBox - boxSize/4, screenPos.Y - halfBox)},
+            {pos = Vector2.new(screenPos.X + halfBox, screenPos.Y - halfBox), pos2 = Vector2.new(screenPos.X + halfBox, screenPos.Y - halfBox + boxSize/4)},
+        }
+        for i, corner in ipairs(corners) do
+            if not pool.corners[i] then pool.corners[i] = createDrawing("Line") end
+            local line = pool.corners[i]
+            if line then
+                pcall(function()
+                    line.From = corner.pos
+                    line.To = corner.pos2
+                    line.Color = color
+                    line.Thickness = 1.5
+                    line.Transparency = 1
+                    line.Visible = true
                 end)
             end
         end
-    end)
+    end
 end
 
+local function clearESPPoolFor(player)
+    local pool = espPool[player]
+    if not pool then return end
+    pcall(function()
+        if pool.box then pcall(function() pool.box:Remove() end) end
+        if pool.tracer then pcall(function() pool.tracer:Remove() end) end
+        if pool.name then pcall(function() pool.name:Remove() end) end
+        if pool.dist then pcall(function() pool.dist:Remove() end) end
+        if pool.corners then for _, l in ipairs(pool.corners) do pcall(function() if l then l:Remove() end end) end end
+    end)
+    espPool[player] = nil
+end
+
+local espRenderConn
 local function setupESPTools()
-    for _, conn in ipairs(espConnections) do
-        pcall(function() conn:Disconnect() end)
-    end
-    espConnections = {}
-    
-    if not (cfg.espBoxFull or cfg.espBoxCorner or cfg.espTracer or cfg.espNameLabels or cfg.espDistanceDisplay) then 
-        return 
-    end
-    
-    local conn = RunService.RenderStepped:Connect(function()
-        if not (cfg.espBoxFull or cfg.espBoxCorner or cfg.espTracer or cfg.espNameLabels or cfg.espDistanceDisplay) then 
-            return 
-        end
-        
+    if espRenderConn then pcall(function() espRenderConn:Disconnect() end) end
+    -- clear old drawings
+    for p,_ in pairs(espPool) do clearESPPoolFor(p) end
+
+    if not (cfg.espBoxFull or cfg.espBoxCorner or cfg.espTracer or cfg.espNameLabels or cfg.espDistanceDisplay) then return end
+
+    espRenderConn = RunService.RenderStepped:Connect(function()
+        local lpHrp = LP.Character and LP.Character:FindFirstChild("HumanoidRootPart")
         for _, p in ipairs(Players:GetPlayers()) do
-            if p == LP or not p.Character then continue end
-            
+            if p == LP then continue end
             local char = p.Character
+            if not char then clearESPPoolFor(p); continue end
             local hum = char:FindFirstChildOfClass("Humanoid")
-            if not hum or hum.Health <= 0 then continue end
-            
-            local hrp = char:FindFirstChild("HumanoidRootPart")
-            if not hrp then continue end
-            
+            if not hum or hum.Health <= 0 then clearESPPoolFor(p); continue end
+
+            local part = char:FindFirstChild("HumanoidRootPart") or char:FindFirstChild("Head")
+            if not part then clearESPPoolFor(p); continue end
+
             local espColor = getESPColor()
-            
-            -- Box ESP (Full)
-            if cfg.espBoxFull then
-                local screenPos, onScreen = Camera:WorldToViewportPoint(hrp.Position)
-                if onScreen then
-                    local size = (Camera:WorldToViewportPoint(hrp.Position + hrp.CFrame.LookVector * 5) - Vector3.new(screenPos.X, screenPos.Y, 0)).Magnitude / 10
-                    drawBoxESP(Vector2.new(screenPos.X, screenPos.Y), size, espColor, true)
+            local screenPos, onScreen = Camera:WorldToViewportPoint(part.Position)
+            if onScreen then
+                local size = (Camera:WorldToViewportPoint(part.Position + part.CFrame.LookVector * 5) - Vector3.new(screenPos.X, screenPos.Y, 0)).Magnitude / 10
+                if cfg.espBoxFull then drawBoxESPFor(p, Vector2.new(screenPos.X, screenPos.Y), size, espColor, true) else if espPool[p] and espPool[p].box then pcall(function() espPool[p].box.Visible = false end) end end
+                if cfg.espBoxCorner then drawBoxESPFor(p, Vector2.new(screenPos.X, screenPos.Y), size, espColor, false) else if espPool[p] and espPool[p].corners then for _,l in ipairs(espPool[p].corners) do pcall(function() l.Visible = false end) end end
+                if cfg.espTracer and lpHrp then
+                    if not espPool[p] then espPool[p] = {} end
+                    if not espPool[p].tracer then espPool[p].tracer = createDrawing("Line") end
+                    local line = espPool[p].tracer
+                    if line then pcall(function()
+                        local s1 = Camera:WorldToViewportPoint(lpHrp.Position)
+                        line.From = Vector2.new(s1.X, s1.Y)
+                        line.To = Vector2.new(screenPos.X, screenPos.Y)
+                        line.Color = espColor
+                        line.Thickness = 1.5
+                        line.Transparency = 0.7
+                        line.Visible = true
+                    end) end
+                else
+                    if espPool[p] and espPool[p].tracer then pcall(function() espPool[p].tracer.Visible = false end) end
                 end
-            end
-            
-            -- Box ESP (Corner)
-            if cfg.espBoxCorner then
-                local screenPos, onScreen = Camera:WorldToViewportPoint(hrp.Position)
-                if onScreen then
-                    local size = (Camera:WorldToViewportPoint(hrp.Position + hrp.CFrame.LookVector * 5) - Vector3.new(screenPos.X, screenPos.Y, 0)).Magnitude / 10
-                    drawBoxESP(Vector2.new(screenPos.X, screenPos.Y), size, espColor, false)
-                end
-            end
-            
-            -- Tracer
-            if cfg.espTracer then
-                local lpHrp = LP.Character and LP.Character:FindFirstChild("HumanoidRootPart")
-                if lpHrp then
-                    local screenPos1, onScreen1 = Camera:WorldToViewportPoint(lpHrp.Position)
-                    local screenPos2, onScreen2 = Camera:WorldToViewportPoint(hrp.Position)
-                    
-                    if onScreen1 and onScreen2 then
-                        pcall(function()
-                            local line = Drawing.new("Line")
-                            line.From = Vector2.new(screenPos1.X, screenPos1.Y)
-                            line.To = Vector2.new(screenPos2.X, screenPos2.Y)
-                            line.Color = espColor
-                            line.Thickness = 1.5
-                            line.Transparency = 0.7
-                            
-                            task.delay(0.016, function()
-                                pcall(function() line:Remove() end)
-                            end)
-                        end)
-                    end
-                end
-            end
-            
-            -- Name Labels
-            if cfg.espNameLabels then
-                local screenPos, onScreen = Camera:WorldToViewportPoint(hrp.Position)
-                if onScreen then
-                    pcall(function()
-                        local text = Drawing.new("Text")
+
+                if cfg.espNameLabels then
+                    if not espPool[p] then espPool[p] = {} end
+                    if not espPool[p].name then espPool[p].name = createDrawing("Text") end
+                    local text = espPool[p].name
+                    if text then pcall(function()
                         text.Position = Vector2.new(screenPos.X, screenPos.Y - 30)
                         text.Text = p.Name
                         text.Color = espColor
                         text.Size = 16
                         text.Center = true
                         text.Outline = true
-                        text.OutlineColor = Color3.new(0, 0, 0)
-                        
-                        task.delay(0.016, function()
-                            pcall(function() text:Remove() end)
-                        end)
+                        text.OutlineColor = Color3.new(0,0,0)
+                        text.Visible = true
+                    end) end
+                else if espPool[p] and espPool[p].name then pcall(function() espPool[p].name.Visible = false end) end end
+
+                if cfg.espDistanceDisplay and lpHrp then
+                    if not espPool[p] then espPool[p] = {} end
+                    if not espPool[p].dist then espPool[p].dist = createDrawing("Text") end
+                    local t = espPool[p].dist
+                    if t then pcall(function()
+                        local dist = math.floor((lpHrp.Position - part.Position).Magnitude)
+                        t.Position = Vector2.new(screenPos.X, screenPos.Y + 10)
+                        t.Text = "["..dist.."m]"
+                        t.Color = espColor
+                        t.Size = 14
+                        t.Center = true
+                        t.Outline = true
+                        t.OutlineColor = Color3.new(0,0,0)
+                        t.Visible = true
+                    end) end
+                else if espPool[p] and espPool[p].dist then pcall(function() espPool[p].dist.Visible = false end) end end
+            else
+                -- off-screen: hide any drawings
+                if espPool[p] then
+                    pcall(function()
+                        if espPool[p].box then espPool[p].box.Visible = false end
+                        if espPool[p].tracer then espPool[p].tracer.Visible = false end
+                        if espPool[p].name then espPool[p].name.Visible = false end
+                        if espPool[p].dist then espPool[p].dist.Visible = false end
+                        if espPool[p].corners then for _,l in ipairs(espPool[p].corners) do l.Visible = false end end
                     end)
-                end
-            end
-            
-            -- Distance Display
-            if cfg.espDistanceDisplay then
-                local lpHrp = LP.Character and LP.Character:FindFirstChild("HumanoidRootPart")
-                if lpHrp then
-                    local dist = math.floor((lpHrp.Position - hrp.Position).Magnitude)
-                    local screenPos, onScreen = Camera:WorldToViewportPoint(hrp.Position)
-                    
-                    if onScreen then
-                        pcall(function()
-                            local text = Drawing.new("Text")
-                            text.Position = Vector2.new(screenPos.X, screenPos.Y + 10)
-                            text.Text = "["..dist.."m]"
-                            text.Color = espColor
-                            text.Size = 14
-                            text.Center = true
-                            text.Outline = true
-                            text.OutlineColor = Color3.new(0, 0, 0)
-                            
-                            task.delay(0.016, function()
-                                pcall(function() text:Remove() end)
-                            end)
-                        end)
-                    end
                 end
             end
         end
     end)
-    
-    table.insert(espConnections, conn)
 end
 
 -- ════════════════════════════════════════════════════════════════════════════
@@ -927,6 +943,7 @@ for _, p in ipairs(Players:GetPlayers()) do onPlayerAdded(p) end
 Players.PlayerAdded:Connect(onPlayerAdded)
 Players.PlayerRemoving:Connect(function(p)
     if p.Character then removeHL(p.Character) end
+    pcall(function() clearESPPoolFor(p) end)
 end)
 RunService.Heartbeat:Connect(refreshESP)
 
