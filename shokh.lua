@@ -375,13 +375,18 @@ end)
 -- ════════════════════════════════════════════════════════════════════════════
 
 local gunConnections = {} -- map tool -> {conns}
+local globalGunConns = {} -- list of non-tool connections (character/backpack listeners)
 local lastAmmo = {}
 
 local function setupGunMods()
     for tool, conns in pairs(gunConnections) do
-        for _, c in ipairs(conns) do pcall(function() c:Disconnect() end) end
+        if type(conns) == "table" then
+            for _, c in ipairs(conns) do pcall(function() c:Disconnect() end) end
+        end
     end
     gunConnections = {}
+    for _, c in ipairs(globalGunConns) do pcall(function() c:Disconnect() end) end
+    globalGunConns = {}
     
     if not (cfg.gunNoSpread or cfg.gunInfAmmo or cfg.gunNoReload or 
             cfg.gunHitChance < 100 or cfg.gunHeadHitChance < 100) then
@@ -390,7 +395,7 @@ local function setupGunMods()
     
     -- Hook tool activation
     local function hookTool(tool)
-        if not tool or not tool:IsA or not tool:IsA("Tool") then return end
+        if not (tool and tool.IsA and tool:IsA and tool:IsA("Tool")) then return end
         -- avoid double-hook
         if gunConnections[tool] then return end
         local conns = {}
@@ -478,14 +483,14 @@ local function setupGunMods()
             hookTool(c)
         end)
     end)
-    table.insert(gunConnections, charConn)
+    table.insert(globalGunConns, charConn)
 
     -- Hook new tools added to backpack
     local backpackConn = LP.Backpack.ChildAdded:Connect(function(child)
         task.wait(0.05)
         hookTool(child)
     end)
-    table.insert(gunConnections, backpackConn)
+    table.insert(globalGunConns, backpackConn)
 end
 
 -- ════════════════════════════════════════════════════════════════════════════
