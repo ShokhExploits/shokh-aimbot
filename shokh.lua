@@ -263,6 +263,7 @@ local DEFAULT = {
     espR=255, espG=60, espB=60,
     silentAim=false, fov=80, showFov=true, hitPart="Head",
     bigHead=false, bigHeadSize=20,
+    aimbot=false, aimbotSpeed=8,
     noShadow=false, fullBright=false,
     uiKey="RightShift",
     -- Aim keybind (default MouseButton2)
@@ -686,62 +687,66 @@ end
 --  BIG HEAD
 -- ────────────────────────────────────────────────────
 local bhConns = {}
+local hitboxes = {}
+
+local function ensureHitboxForChar(char)
+    if not char then return end
+    local head = char:FindFirstChild("Head")
+    if not head then return end
+    -- remove existing
+    local existing = char:FindFirstChild("ShokhHitbox")
+    if existing then existing:Destroy() end
+
+    local hb = Instance.new("Part")
+    hb.Name = "ShokhHitbox"
+    hb.Size = Vector3.new(cfg.bigHeadSize, cfg.bigHeadSize, cfg.bigHeadSize)
+    hb.Transparency = 1
+    hb.CanCollide = false
+    hb.Anchored = false
+    hb.Massless = true
+    hb.Parent = char
+
+    -- Position to head
+    hb.CFrame = head.CFrame
+
+    -- Weld to head so it follows movement
+    local weld = Instance.new("WeldConstraint")
+    weld.Part0 = hb; weld.Part1 = head; weld.Parent = hb
+
+    hitboxes[char] = hb
+    return hb
+end
+
+local function removeHitboxForChar(char)
+    if not char then return end
+    local hb = char:FindFirstChild("ShokhHitbox")
+    if hb then hb:Destroy() end
+    hitboxes[char] = nil
+end
 
 local function applyBigHead(player)
     if player == LP then return end
     local function doChar(char)
-        local head = char:FindFirstChild("Head")
-        if not head then return end
-        
-        -- Store original size once
-        if not head:GetAttribute("ShokhOrigHead") then
-            head:SetAttribute("ShokhOrigHead", head.Size.X..","..head.Size.Y..","..head.Size.Z)
+        if not char then return end
+        removeHitboxForChar(char)
+        if cfg.bigHead then
+            ensureHitboxForChar(char)
         end
-        
-        local conn = RunService.Heartbeat:Connect(function()
-            if not head or not head.Parent then return end
-            if not cfg.bigHead then return end
-            
-            local targetSize = cfg.bigHeadSize
-            if head.Size.X ~= targetSize then
-                head.Size = Vector3.new(targetSize, targetSize, targetSize)
-            end
-        end)
-        
-        table.insert(bhConns, conn)
-        
-        -- Clean up on character death
         char.AncestryChanged:Connect(function()
-            pcall(function() conn:Disconnect() end)
+            removeHitboxForChar(char)
         end)
     end
-    
     player.CharacterAdded:Connect(doChar)
     if player.Character then doChar(player.Character) end
 end
 
 local function restoreHeads()
-    for _, c in ipairs(bhConns) do 
-        pcall(function() c:Disconnect() end) 
+    -- remove all hitboxes
+    for char, hb in pairs(hitboxes) do
+        pcall(function() if hb and hb.Parent then hb:Destroy() end end)
     end
-    bhConns = {}
-    
-    for _, p in ipairs(Players:GetPlayers()) do
-        if p == LP then continue end
-        local char = p.Character
-        if not char then continue end
-        
-        local head = char:FindFirstChild("Head")
-        if not head then continue end
-        
-        local orig = head:GetAttribute("ShokhOrigHead")
-        if orig then
-            local x, y, z = orig:match("([%d%.]+),([%d%.]+),([%d%.]+)")
-            if x then 
-                head.Size = Vector3.new(tonumber(x), tonumber(y), tonumber(z))
-            end
-        end
-    end
+    hitboxes = {}
+end
 end
 
 -- ────────────────────────────────────────────────────
@@ -772,7 +777,8 @@ local function getTarget()
         local hum = char:FindFirstChildOfClass("Humanoid")
         if not hum or hum.Health <= 0 then continue end
         
-        local part = char:FindFirstChild(hitPart) or char:FindFirstChild("Head") or char:FindFirstChild("HumanoidRootPart")
+        -- prefer our hitbox if present
+        local part = char:FindFirstChild("ShokhHitbox") or char:FindFirstChild(hitPart) or char:FindFirstChild("Head") or char:FindFirstChild("HumanoidRootPart")
         if not part then continue end
         
         local sp, vis = Camera:WorldToViewportPoint(part.Position)
@@ -815,7 +821,8 @@ local function installHook()
             local aimActive = (cfg.silentAim or aimPressed)
             if aimActive and currentTarget and currentTarget.Parent then
                 if key == "Hit" then 
-                    return CFrame.new(currentTarget.Position + currentTarget.Size/2)
+                    -- return exact CFrame of the target part
+                    return (currentTarget.CFrame or CFrame.new(currentTarget.Position))
                 elseif key == "Target" then 
                     return currentTarget 
                 elseif key == "X" then 
@@ -856,6 +863,16 @@ RunService.RenderStepped:Connect(function()
         end
     else
         currentTarget = nil
+    end
+end)
+
+-- Aimbot: smooth camera aim when enabled and aiming
+RunService.RenderStepped:Connect(function(dt)
+    if cfg.aimbot and aimPressed and currentTarget and currentTarget.Parent then
+        local cam = Camera
+        local tgtPos = currentTarget.Position
+        local desired = CFrame.new(cam.CFrame.Position, tgtPos)
+        cam.CFrame = cam.CFrame:Lerp(desired, math.clamp(dt * cfg.aimbotSpeed, 0, 1))
     end
 end)
 
@@ -1431,8 +1448,16 @@ local syncSilent=mkToggle(mainSc,"Silent Aim","Hooks Mouse.Hit — no camera mov
     cfg.silentAim=v; syncFovCircle()
 end)
 
+local syncAimbot=mkToggle(mainSc,"Aimbot","Smooth camera aim while holding aim key",cfg.aimbot,11.5,function(v)
+    cfg.aimbot=v
+end)
+
 local syncFov=mkSlider(mainSc,"FOV Radius","Pixel radius of the aim cone (shows as circle)",15,150,cfg.fov,12,function(v)
     cfg.fov=v; syncFovCircle()
+end)
+
+local syncAimbotSpeed=mkSlider(mainSc,"Aimbot Speed","Higher is faster",1,20,cfg.aimbotSpeed,12.2,function(v)
+    cfg.aimbotSpeed=v
 end)
 
 local syncShowFov=mkToggle(mainSc,"Show FOV Circle",nil,cfg.showFov,13,function(v)
@@ -1536,6 +1561,8 @@ local function syncAllUI()
     syncHitPart(cfg.hitPart)
     syncBigHead(cfg.bigHead)
     syncBigSz(cfg.bigHeadSize)
+    syncAimbot(cfg.aimbot)
+    syncAimbotSpeed(cfg.aimbotSpeed)
     syncNoShadow(cfg.noShadow)
     syncFullBright(cfg.fullBright)
     syncGunNoSpread(cfg.gunNoSpread)
